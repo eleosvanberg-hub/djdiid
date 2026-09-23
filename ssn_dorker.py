@@ -50,7 +50,7 @@ except ImportError:
 # Constants
 # ─────────────────────────────────────────────────────────────
 
-VERSION = "2.1.0"
+VERSION = "3.0.0"
 CONFIG_FILE = Path.home() / ".ssn_dorker.env"
 LOG_DIR = Path("logs")
 RESULTS_DIR = Path("results")
@@ -74,71 +74,130 @@ SEV_EMOJI = {
     "info":     "ℹ️",
 }
 
-# Dork categories ──────────────────────────────────────────────
+# ── Noise exclusion appended to every query ───────────────────
+_NOISE_EXCLUDE = (
+    ' -site:reddit.com -site:quora.com -site:medium.com -site:wikipedia.org'
+    ' -site:stackoverflow.com -site:github.com -site:youtube.com'
+    ' -site:ssa.gov -site:irs.gov -site:ftc.gov -site:usa.gov'
+    ' -inurl:blog -inurl:article -inurl:news -inurl:forum'
+    ' -intitle:"how to" -intitle:"what is" -intitle:"guide"'
+    ' -intitle:"tutorial" -intitle:"definition" -intitle:"meaning"'
+)
+
+def _q(query: str) -> str:
+    """Append noise-exclusion terms to a dork query."""
+    return query + _NOISE_EXCLUDE
+
+
+# Dork categories — operational portals only ───────────────────
 DORK_TEMPLATES = {
-    "ssn_lookup": [
-        'intitle:"SSN lookup" OR intitle:"social security lookup"',
-        'inurl:"ssn" site:.com "lookup" "social security number"',
-        '"social security number" "lookup" "free" -site:ssa.gov',
-        'intitle:"find SSN" OR intitle:"SSN search" "social security"',
-        '"ssn lookup" OR "ssn search" filetype:html',
-        'inurl:"ssn-lookup" OR inurl:"ssn_lookup" OR inurl:"ssn/lookup"',
+
+    # ── Portals with actual SSN input forms ──────────────────
+    "portal_forms": [
+        _q('inurl:ssn-search OR inurl:ssn-lookup OR inurl:ssn-check -site:gov'),
+        _q('inurl:"/search" "social security number" "first name" "last name" "submit"'),
+        _q('"enter ssn" OR "enter social security" "search" "results" -site:gov'),
+        _q('"ssn" "date of birth" "search now" OR "find now" OR "lookup now"'),
+        _q('inurl:lookup "ssn" "dob" "address" inurl:search OR inurl:report'),
+        _q('"social security number" "last 4" OR "last four" inurl:verify OR inurl:check'),
+        _q('inurl:".php?ssn=" OR inurl:".asp?ssn=" OR inurl:"ssn="'),
+        _q('intitle:"SSN Search" OR intitle:"SSN Lookup" OR intitle:"SSN Verify" -blog'),
     ],
-    "data_brokers": [
-        '"social security number" "background check" "full name" inurl:search',
-        '"ssn" "date of birth" "address history" site:.com -site:ssa.gov',
-        'intitle:"people search" "ssn" "social security"',
-        '"find anyone" "ssn" "social security number" OR "SSN"',
-        '"background check" "SSN" "full report" -site:gov',
-        'inurl:"people-search" OR inurl:"people_search" "social security"',
+
+    # ── Paid / subscription SSN data portals ────────────────
+    "paid_portals": [
+        _q('"ssn lookup" "per report" OR "per search" OR "/month" "$"'),
+        _q('"social security" "instant report" "order now" OR "buy now" OR "get report"'),
+        _q('"ssn" "background check" "add to cart" OR "checkout" OR "subscribe"'),
+        _q('"full background report" "ssn" "address history" "criminal" "$"'),
+        _q('"ssn" "unlimited searches" OR "unlimited reports" "subscribe"'),
+        _q('"people search" "ssn included" OR "ssn report" "$" -site:gov'),
+        _q('inurl:/checkout OR inurl:/order OR inurl:/purchase "ssn" "social security"'),
+        _q('"background check" "social security number" "credit card" OR "payment" -site:gov'),
     ],
-    "exposed_databases": [
-        'filetype:sql "social_security" OR "ssn" OR "social_security_number"',
-        'filetype:csv "ssn" "first_name" "last_name" "date_of_birth"',
-        'filetype:xls "social security number" "SSN" "dob"',
-        'filetype:txt "###-##-####" "ssn" OR "social security"',
-        'ext:log "social security" OR "ssn" "###-##-####"',
-        'intext:"social_security_number" filetype:json OR filetype:xml',
+
+    # ── Data broker & people-search portals ─────────────────
+    "data_broker_portals": [
+        _q('inurl:/people-search "ssn" "address" "relatives" "search"'),
+        _q('"find anyone" "ssn" "dob" "current address" "search" -site:gov'),
+        _q('intitle:"People Search" "social security" "background" "report"'),
+        _q('"reverse ssn lookup" OR "ssn reverse lookup" inurl:search'),
+        _q('"ssn" "maiden name" "address history" "phone" "email" inurl:report'),
+        _q('inurl:"person-search" OR inurl:"people_finder" "ssn" "social security"'),
+        _q('"comprehensive background" "ssn" "criminal" "address" "relatives"'),
     ],
-    "identity_theft": [
-        '"buy ssn" OR "sell ssn" OR "ssn for sale" -site:gov',
-        '"full info" "ssn" "dob" "address" site:.com -site:ssa.gov',
-        '"ssn" "fullz" OR "full info" "credit card"',
-        'inurl:"ssn" "purchase" OR "buy" "social security number"',
+
+    # ── URL pattern portals ──────────────────────────────────
+    "url_patterns": [
+        _q('inurl:"/ssn/" OR inurl:"/ssn-" OR inurl:"-ssn" -site:gov -site:edu'),
+        _q('inurl:"/verify-ssn" OR inurl:"/ssn-verify" OR inurl:"/check-ssn"'),
+        _q('inurl:"/ssn-report" OR inurl:"/ssn-results" OR inurl:"/ssn-search"'),
+        _q('inurl:"/api/ssn" OR inurl:"/ssn/api" OR inurl:"/ssn/v1"'),
+        _q('inurl:"ssn_lookup" OR inurl:"ssn_search" OR inurl:"ssn_check" ext:php'),
+        _q('inurl:"/member" OR inurl:"/portal" "ssn lookup" "reports remaining"'),
     ],
-    "breach_data": [
-        '"social security" "leaked" OR "breached" OR "exposed" filetype:txt',
-        '"ssn" site:pastebin.com OR site:ghostbin.com OR site:hastebin.com',
-        '"social security number" "data breach" "download"',
-        '"ssn dump" OR "ssn leak" -site:gov -site:edu',
-        'site:ghostbin.co OR site:paste.ee "social security" OR "ssn"',
+
+    # ── Member / login portals selling SSN data ──────────────
+    "member_portals": [
+        _q('"ssn lookup" "login" OR "sign in" "account" "reports"'),
+        _q('"social security search" "dashboard" "searches remaining" OR "credits"'),
+        _q('"ssn" "member area" OR "members only" "lookup" "reports"'),
+        _q('"ssn" "api key" OR "api access" "lookup" "documentation"'),
+        _q('inurl:/dashboard OR inurl:/portal "ssn lookup" "remaining" OR "credits"'),
     ],
-    "api_endpoints": [
-        'inurl:"api" "ssn" "social_security" filetype:json',
-        'inurl:"/api/v" "ssn" OR "social_security_number"',
-        'intext:"ssn" inurl:"swagger" OR inurl:"api-docs"',
-        '"ssn_verification" OR "ssn_lookup" inurl:api',
+
+    # ── Exposed DB files ─────────────────────────────────────
+    "exposed_files": [
+        _q('filetype:sql "social_security_number" OR "ssn" "INSERT INTO"'),
+        _q('filetype:csv "ssn","first_name","last_name","dob"'),
+        _q('filetype:xls OR filetype:xlsx "social security number" "dob" "address"'),
+        _q('filetype:txt "ssn" "###-##-####" -site:gov'),
+        _q('intitle:"index of" "ssn" "csv" OR "sql" OR "xls" -site:gov'),
+        _q('intext:"social_security_number" filetype:json -site:gov'),
     ],
-    "directory_listings": [
-        'intitle:"index of" "ssn" OR "social_security" filetype:csv OR filetype:xls',
-        'intitle:"index of /" "ssn" "database"',
-        'intitle:"directory listing" "social security" OR "ssn"',
+
+    # ── API / developer portals ──────────────────────────────
+    "api_portals": [
+        _q('inurl:"/api/v" "ssn" "social_security" -site:gov'),
+        _q('"ssn_verification" OR "ssn_lookup" inurl:swagger OR inurl:api-docs'),
+        _q('"ssn" "api_key" OR "apikey" "lookup" "response" filetype:json'),
+        _q('"POST /ssn" OR "GET /ssn" inurl:docs OR inurl:api'),
+        _q('"ssn":"' + '" inurl:api OR inurl:endpoint -site:gov'),
     ],
-    "error_disclosures": [
-        'intext:"ssn" "sql syntax" OR "mysql error" OR "database error"',
-        '"social_security_number" "ORA-" OR "MySQL" site:.com',
-        '"ssn" "exception" "stack trace" "social security"',
-    ],
-    "government_adjacent": [
-        '"social security" "ssn" -site:ssa.gov -site:gov "lookup" "search"',
-        'inurl:"ssn-check" OR inurl:"verify-ssn" OR inurl:"ssn-verify"',
-        '"verify social security number" "online" "instant"',
-    ],
-    "dark_web_clearnet": [
-        '"ssn" "onion" OR ".onion" "social security" site:.com',
-        '"deep web" "ssn" "social security" "find"',
-        '"ssn" "dark web" "purchase" OR "lookup" -site:gov',
-    ],
+}
+
+# ── Site fingerprinting constants ──────────────────────────────
+FORM_FIELD_INDICATORS = [
+    'name="ssn"', 'name="social_security"', 'name="social-security"',
+    'id="ssn"', 'id="social_security"', 'placeholder="ssn"',
+    'name="ssn_number"', 'name="ssn1"', 'name="ssn2"', 'name="ssn3"',
+    'type="ssn"', 'data-field="ssn"',
+]
+PAID_INDICATORS = [
+    'add to cart', 'checkout', 'subscribe', 'per report', 'per search',
+    'buy now', 'order now', 'payment', 'credit card', 'monthly plan',
+    'unlimited searches', 'reports remaining', 'credits',
+]
+PORTAL_INDICATORS = [
+    'ssn lookup', 'ssn search', 'ssn check', 'ssn verify',
+    'social security lookup', 'social security search',
+    'background report', 'people search', 'find anyone',
+    'reverse ssn', 'ssn report', 'instant results',
+]
+TECH_HEADERS = ['x-powered-by', 'server', 'x-generator', 'x-framework']
+SITE_TYPE_MAP = {
+    'checkout':          'Paid Portal',
+    'subscribe':         'Subscription Portal',
+    'api_key':           'API Service',
+    'dashboard':         'Member Portal',
+    'swagger':           'API Docs',
+    'index of':          'Directory Listing',
+    'sql syntax':        'Error Disclosure',
+    'mysql_error':       'Error Disclosure',
+    'ssn lookup':        'SSN Lookup Portal',
+    'people search':     'People Search Portal',
+    'background report': 'Background Check Portal',
+    'data breach':       'Breach Data Site',
 }
 
 RISK_KEYWORDS = {
@@ -346,6 +405,113 @@ class ValueSERPClient:
 
 
 # ─────────────────────────────────────────────────────────────
+# Site fingerprinter — live page analysis, no data submitted
+# ─────────────────────────────────────────────────────────────
+
+class SiteFingerprinter:
+    """
+    Fetches each discovered URL and extracts:
+      - HTTP status & redirect chain
+      - Server / tech stack from headers
+      - SSN form fields present on the page
+      - Payment / subscription indicators
+      - Portal type classification
+    No SSN or personal data is submitted at any point.
+    """
+
+    _HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    }
+
+    def __init__(self, timeout: int = 12, proxy: str = "", logger: Optional[logging.Logger] = None):
+        self.timeout = timeout
+        self.logger  = logger or logging.getLogger("fingerprinter")
+        self._session = requests.Session()
+        self._session.headers.update(self._HEADERS)
+        self._session.max_redirects = 5
+        if proxy:
+            self._session.proxies = {"http": proxy, "https": proxy}
+
+    def fingerprint(self, url: str) -> dict:
+        fp: dict = {
+            "status":      None,
+            "final_url":   url,
+            "server":      "",
+            "tech":        [],
+            "form_fields": [],
+            "paid":        False,
+            "paid_hints":  [],
+            "portal_type": "Unknown",
+            "indicators":  [],
+            "error":       "",
+        }
+        try:
+            resp = self._session.get(url, timeout=self.timeout, allow_redirects=True)
+            fp["status"]    = resp.status_code
+            fp["final_url"] = resp.url
+
+            # ── Headers ──────────────────────────────────────
+            h = resp.headers
+            fp["server"] = h.get("server", h.get("Server", ""))
+            for hdr in TECH_HEADERS:
+                val = h.get(hdr, "")
+                if val:
+                    fp["tech"].append(f"{hdr}: {val}")
+
+            if resp.status_code not in (200, 206):
+                fp["error"] = f"HTTP {resp.status_code}"
+                return fp
+
+            body = resp.text.lower()
+
+            # ── Form field detection ──────────────────────────
+            for indicator in FORM_FIELD_INDICATORS:
+                if indicator in body:
+                    fp["form_fields"].append(indicator)
+
+            # ── Paid / subscription indicators ───────────────
+            for kw in PAID_INDICATORS:
+                if kw in body:
+                    fp["paid"] = True
+                    fp["paid_hints"].append(kw)
+
+            # ── Portal type classification ────────────────────
+            for kw, label in SITE_TYPE_MAP.items():
+                if kw in body:
+                    fp["portal_type"] = label
+                    fp["indicators"].append(kw)
+                    break
+
+            # Refine if form fields found
+            if fp["form_fields"] and fp["portal_type"] == "Unknown":
+                fp["portal_type"] = "SSN Input Form"
+
+            # ── Extra portal indicators ───────────────────────
+            for kw in PORTAL_INDICATORS:
+                if kw in body and kw not in fp["indicators"]:
+                    fp["indicators"].append(kw)
+
+        except requests.exceptions.SSLError:
+            fp["error"] = "SSL Error"
+        except requests.exceptions.ConnectionError:
+            fp["error"] = "Connection Failed"
+        except requests.exceptions.Timeout:
+            fp["error"] = "Timeout"
+        except requests.exceptions.TooManyRedirects:
+            fp["error"] = "Too Many Redirects"
+        except Exception as e:
+            fp["error"] = str(e)[:80]
+
+        return fp
+
+
+# ─────────────────────────────────────────────────────────────
 # Result processing
 # ─────────────────────────────────────────────────────────────
 
@@ -438,6 +604,60 @@ def print_result_table(results: list[dict], title: str = "Results"):
         )
 
     console.print(table)
+
+
+def print_fingerprint_result(r: dict, idx: int):
+    """Print a single fingerprinted result in the structured card format."""
+    fp  = r.get("fp", {})
+    sev = r.get("severity", "info")
+    color = SEVERITY_COLORS.get(sev, "white")
+
+    if not RICH_AVAILABLE:
+        print(f"\n[{idx:03d}] {'='*60}")
+        print(f"  SITE    : {r['url']}")
+        print(f"  TYPE    : {fp.get('portal_type','?')}")
+        print(f"  STATUS  : {fp.get('status','?')}  |  {'LIVE' if fp.get('status')==200 else 'DEAD/ERR'}")
+        print(f"  SERVER  : {fp.get('server','?')}")
+        print(f"  TECH    : {', '.join(fp.get('tech',[]))}")
+        print(f"  FORMS   : {', '.join(fp.get('form_fields',[]))}")
+        print(f"  PAID    : {'YES — ' + ', '.join(fp.get('paid_hints',[])) if fp.get('paid') else 'no'}")
+        print(f"  DETECT  : {', '.join(fp.get('indicators',[]))}")
+        if fp.get('error'):
+            print(f"  ERROR   : {fp['error']}")
+        return
+
+    status_str = str(fp.get("status", "—"))
+    live_str   = "[green]LIVE[/green]" if fp.get("status") == 200 else "[red]DEAD[/red]"
+    paid_str   = (
+        f"[bold yellow]YES[/bold yellow] — {', '.join(fp.get('paid_hints', [])[:3])}"
+        if fp.get("paid") else "[dim]no[/dim]"
+    )
+    forms_str = (
+        f"[bold cyan]{', '.join(fp['form_fields'][:4])}[/bold cyan]"
+        if fp.get("form_fields") else "[dim]none detected[/dim]"
+    )
+    tech_str = ", ".join(fp.get("tech", [])[:3]) or "—"
+    detect_str = ", ".join(fp.get("indicators", [])[:5]) or "—"
+    error_str = fp.get("error", "")
+
+    score = r.get("risk_score", 0)
+    bar = "█" * (score // 10) + "░" * (10 - score // 10)
+
+    lines = [
+        f"[dim][{idx:03d}][/dim]  [{color}]{sev.upper()}[/{color}]  Score [{color}]{score:3d}[/{color}] {bar}",
+        f"  [bold]SITE   [/bold] {r['url']}",
+        f"  [bold]TYPE   [/bold] [{color}]{fp.get('portal_type','Unknown')}[/{color}]",
+        f"  [bold]STATUS [/bold] {status_str}  {live_str}",
+        f"  [bold]SERVER [/bold] {fp.get('server','—')}",
+        f"  [bold]TECH   [/bold] {tech_str}",
+        f"  [bold]FORMS  [/bold] {forms_str}",
+        f"  [bold]PAID   [/bold] {paid_str}",
+        f"  [bold]DETECT [/bold] {detect_str}",
+    ]
+    if error_str:
+        lines.append(f"  [bold]ERROR  [/bold] [red]{error_str}[/red]")
+
+    console.print(Panel("\n".join(lines), border_style=color, expand=False))
 
 
 def print_stats(stats: dict):
@@ -796,11 +1016,20 @@ class TelegramNotifier:
 
 class SSNDorker:
     def __init__(self, config: dict, logger: logging.Logger,
-                 notifier: Optional["TelegramNotifier"] = None):
-        self.config   = config
-        self.logger   = logger
-        self.notifier = notifier
-        self.client   = ValueSERPClient(config["api_key"], config, logger)
+                 notifier: Optional["TelegramNotifier"] = None,
+                 fingerprint: bool = False):
+        self.config      = config
+        self.logger      = logger
+        self.notifier    = notifier
+        self.fingerprint = fingerprint
+        self.client      = ValueSERPClient(config["api_key"], config, logger)
+        self.fp_engine   = (
+            SiteFingerprinter(
+                timeout=config.get("timeout", 12),
+                proxy=config.get("proxy", ""),
+                logger=logger,
+            ) if fingerprint else None
+        )
         self.all_results: list[dict] = []
         self.seen_urls:   set[str]   = set()
         self.stats:       dict       = defaultdict(int)
@@ -823,6 +1052,19 @@ class SSNDorker:
                     r["dork_query"] = query
                     r["dork_page"] = page
                     r["discovered_at"] = datetime.utcnow().isoformat()
+                    # Live fingerprint (no data submitted — read-only page fetch)
+                    if self.fp_engine:
+                        r["fp"] = self.fp_engine.fingerprint(r["url"])
+                        # Boost score if live form fields found
+                        if r["fp"].get("form_fields"):
+                            r["risk_score"] = min(r["risk_score"] + 25, 100)
+                            if r["severity"] == "info":
+                                r["severity"] = "medium"
+                        if r["fp"].get("paid"):
+                            r["risk_score"] = min(r["risk_score"] + 10, 100)
+                    else:
+                        r["fp"] = {}
+
                     found.append(r)
                     # Real-time Telegram alert for high/critical hits
                     if self.notifier and sev in ("critical", "high", "medium"):
@@ -1110,6 +1352,14 @@ EXAMPLES
     p.add_argument("--domain-filter", metavar="DOMAIN", nargs="+",
                    help="Only include results from these domains")
 
+    # Fingerprinting
+    p.add_argument("--fingerprint",  action="store_true",
+                   help="Fetch each found URL and fingerprint it (form fields, server, type)")
+    p.add_argument("--live-only",    action="store_true",
+                   help="Only keep results where the site responded HTTP 200 (requires --fingerprint)")
+    p.add_argument("--forms-only",   action="store_true",
+                   help="Only keep results where an SSN form field was detected (requires --fingerprint)")
+
     # Output
     p.add_argument("--export", choices=["json","csv","html","txt","all","none"],
                    default="all", help="Export format (default: all)")
@@ -1271,7 +1521,8 @@ def main():
             cprint("[yellow]Warning: Telegram test failed — notifications disabled.[/yellow]")
             notifier = None
 
-    dorker = SSNDorker(config, logger, notifier=notifier)
+    dorker = SSNDorker(config, logger, notifier=notifier,
+                       fingerprint=args.fingerprint)
     results = dorker.run(
         categories=categories,
         pages=pages,
@@ -1286,10 +1537,20 @@ def main():
         results = [r for r in results if r.get("severity") == args.only_severity]
     if args.domain_filter:
         results = [r for r in results if r.get("domain") in args.domain_filter]
+    if args.live_only:
+        results = [r for r in results if r.get("fp", {}).get("status") == 200]
+    if args.forms_only:
+        results = [r for r in results if r.get("fp", {}).get("form_fields")]
 
     if not args.no_print:
         top = args.top or len(results)
-        print_result_table(results[:top], title=f"SSN Dork Results ({len(results)} total)")
+        display = results[:top]
+        if args.fingerprint:
+            cprint(f"\n[bold]Found {len(display)} results[/bold]\n")
+            for i, r in enumerate(display, 1):
+                print_fingerprint_result(r, i)
+        else:
+            print_result_table(display, title=f"SSN Dork Results ({len(results)} total)")
         print_severity_breakdown(results)
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
