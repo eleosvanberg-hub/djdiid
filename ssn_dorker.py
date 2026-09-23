@@ -50,7 +50,7 @@ except ImportError:
 # Constants
 # ─────────────────────────────────────────────────────────────
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 CONFIG_FILE = Path.home() / ".ssn_dorker.env"
 LOG_DIR = Path("logs")
 RESULTS_DIR = Path("results")
@@ -63,6 +63,16 @@ BANNER = """
 ╚══════════════════════════════════════════════════════════════╝
   ⚠  For authorized security research and privacy audits only.
 """.format(ver=VERSION)
+
+TG_API_BASE = "https://api.telegram.org/bot{token}/{method}"
+# Severity → emoji mapping used in Telegram messages
+SEV_EMOJI = {
+    "critical": "🚨",
+    "high":     "⚠️",
+    "medium":   "🟡",
+    "low":      "🟢",
+    "info":     "ℹ️",
+}
 
 # Dork categories ──────────────────────────────────────────────
 DORK_TEMPLATES = {
@@ -201,6 +211,11 @@ def load_config() -> dict:
         "language":       os.getenv("DORKER_LANGUAGE", "en"),
         "safe":           os.getenv("DORKER_SAFE", "off"),
         "timeout":        int(os.getenv("DORKER_TIMEOUT", "30")),
+        # Telegram
+        "tg_bot_token":   os.getenv("TG_BOT_TOKEN", ""),
+        "tg_chat_id":     os.getenv("TG_CHAT_ID", ""),
+        "tg_min_score":   int(os.getenv("TG_MIN_SCORE", "0")),
+        "tg_send_files":  os.getenv("TG_SEND_FILES", "true").lower() == "true",
     }
 
 
@@ -208,6 +223,18 @@ def save_api_key(api_key: str):
     CONFIG_FILE.touch(mode=0o600)
     set_key(str(CONFIG_FILE), "VALUESERP_API_KEY", api_key)
     cprint(f"[green]API key saved to {CONFIG_FILE}[/green]")
+
+
+def save_tg_token(token: str):
+    CONFIG_FILE.touch(mode=0o600)
+    set_key(str(CONFIG_FILE), "TG_BOT_TOKEN", token)
+    cprint(f"[green]Telegram bot token saved to {CONFIG_FILE}[/green]")
+
+
+def save_tg_chat_id(chat_id: str):
+    CONFIG_FILE.touch(mode=0o600)
+    set_key(str(CONFIG_FILE), "TG_CHAT_ID", chat_id)
+    cprint(f"[green]Telegram chat ID saved to {CONFIG_FILE}[/green]")
 
 
 def prompt_api_key() -> str:
@@ -561,17 +588,222 @@ def export_txt(results: list[dict], path: Path, meta: dict):
 
 
 # ─────────────────────────────────────────────────────────────
+# Telegram notifier
+# ─────────────────────────────────────────────────────────────
+
+class TelegramNotifier:
+    """Send real-time dork findings and session summaries to a Telegram chat."""
+
+    def __init__(self, bot_token: str, chat_id: str, logger: logging.Logger,
+                 proxy: str = "", min_score: int = 0):
+        self.bot_token = bot_token.strip()
+        self.chat_id   = str(chat_id).strip()
+        self.logger    = logger
+        self.min_score = min_score
+        self._session  = requests.Session()
+        if proxy:
+            self._session.proxies = {"http": proxy, "https": proxy}
+        self._last_send = 0.0      # unix timestamp of last message sent
+        self._send_interval = 1.1  # stay comfortably under Telegram's 1 msg/s limit
+        self._ok = False           # set True after a successful test
+
+    # ── Low-level helpers ─────────────────────────────────────
+
+    def _url(self, method: str) -> str:
+        return TG_API_BASE.format(token=self.bot_token, method=method)
+
+    def _throttle(self):
+        """Ensure we never send faster than _send_interval seconds."""
+        elapsed = time.time() - self._last_send
+        if elapsed < self._send_interval:
+            time.sleep(self._send_interval - elapsed)
+        self._last_send = time.time()
+
+    def _post(self, method: str, **kwargs) -> dict:
+        self._throttle()
+        try:
+            resp = self._session.post(self._url(method), timeout=15, **kwargs)
+            data = resp.json()
+            if not data.get("ok"):
+                self.logger.warning("Telegram API error (%s): %s", method, data.get("description"))
+            return data
+        except Exception as e:
+            self.logger.error("Telegram request failed (%s): %s", method, e)
+            return {}
+
+    @staticmethod
+    def _escape(text: str) -> str:
+        """Escape special chars for Telegram HTML parse mode."""
+        return (text
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;"))
+
+    @staticmethod
+    def _chunk(text: str, size: int = 4000) -> list[str]:
+        """Split text into chunks that fit within Telegram's 4096-char limit."""
+        return [text[i:i + size] for i in range(0, len(text), size)]
+
+    # ── Public API ────────────────────────────────────────────
+
+    def send_message(self, html: str, silent: bool = False) -> bool:
+        """Send an HTML-formatted message, splitting if over 4000 chars."""
+        chunks = self._chunk(html)
+        success = True
+        for i, chunk in enumerate(chunks):
+            data = self._post(
+                "sendMessage",
+                data={
+                    "chat_id":                  self.chat_id,
+                    "text":                     chunk,
+                    "parse_mode":               "HTML",
+                    "disable_web_page_preview": True,
+                    "disable_notification":     silent,
+                },
+            )
+            if not data.get("ok"):
+                success = False
+        return success
+
+    def send_document(self, path: Path, caption: str = "") -> bool:
+        """Upload a file as a Telegram document."""
+        if not path.exists():
+            self.logger.warning("TG send_document: file not found: %s", path)
+            return False
+        self._throttle()
+        try:
+            with path.open("rb") as fh:
+                data = self._post(
+                    "sendDocument",
+                    data={
+                        "chat_id":    self.chat_id,
+                        "caption":    caption[:1024],
+                        "parse_mode": "HTML",
+                    },
+                    files={"document": (path.name, fh)},
+                )
+            return data.get("ok", False)
+        except Exception as e:
+            self.logger.error("Telegram send_document failed: %s", e)
+            return False
+
+    def test(self) -> bool:
+        """Verify credentials by calling getMe and sending a test ping."""
+        data = self._post("getMe")
+        if not data.get("ok"):
+            cprint("[red]Telegram: getMe failed — check bot token.[/red]")
+            return False
+        bot_name = data.get("result", {}).get("username", "?")
+        ok = self.send_message(
+            f"🤖 <b>SSN Dorker v{VERSION}</b> connected\n"
+            f"Bot: @{self._escape(bot_name)}\n"
+            f"Chat ID: <code>{self._escape(self.chat_id)}</code>\n"
+            f"<i>Notifications are active.</i>"
+        )
+        if ok:
+            self._ok = True
+            cprint(f"[green]Telegram: connected as @{bot_name}[/green]")
+        return ok
+
+    # ── Structured event messages ─────────────────────────────
+
+    def send_scan_start(self, categories: list[str], pages: int, total_queries: int):
+        cat_str = ", ".join(f"<code>{self._escape(c)}</code>" for c in categories[:8])
+        if len(categories) > 8:
+            cat_str += f" +{len(categories) - 8} more"
+        self.send_message(
+            f"🔍 <b>SSN Dorker — Scan Started</b>\n\n"
+            f"📂 <b>Categories:</b> {cat_str}\n"
+            f"📄 <b>Pages/query:</b> {pages}\n"
+            f"🔢 <b>Total queries:</b> {total_queries}\n"
+            f"🕐 <b>Started:</b> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC",
+            silent=True,
+        )
+
+    def send_result(self, result: dict):
+        """Send a single finding if it meets the minimum score threshold."""
+        score = result.get("risk_score", 0)
+        if score < self.min_score:
+            return
+        sev   = result.get("severity", "info")
+        emoji = SEV_EMOJI.get(sev, "ℹ️")
+        title   = self._escape(result.get("title", "")[:120])
+        url     = self._escape(result.get("url", "")[:200])
+        domain  = self._escape(result.get("domain", ""))
+        snippet = self._escape(result.get("snippet", "")[:200])
+        dork    = self._escape(result.get("dork_query", "")[:100])
+
+        self.send_message(
+            f"{emoji} <b>{sev.upper()}</b>  |  Score: <b>{score}</b>\n\n"
+            f"📌 <b>Title:</b> {title}\n"
+            f"🔗 <b>URL:</b> <a href=\"{url}\">{url}</a>\n"
+            f"🌐 <b>Domain:</b> <code>{domain}</code>\n"
+            f"📄 <b>Snippet:</b> <i>{snippet}</i>\n"
+            f"🔎 <b>Dork:</b> <code>{dork}</code>"
+        )
+
+    def send_summary(self, results: list[dict], meta: dict, exported_files: list[Path]):
+        """Send a final summary message and optionally attach exported files."""
+        counts: defaultdict[str, int] = defaultdict(int)
+        for r in results:
+            counts[r.get("severity", "info")] += 1
+
+        sev_lines = "  ".join(
+            f"{SEV_EMOJI[s]} {s.capitalize()}: <b>{counts[s]}</b>"
+            for s in ("critical", "high", "medium", "low", "info")
+            if counts[s]
+        )
+
+        self.send_message(
+            f"✅ <b>SSN Dorker — Scan Complete</b>\n\n"
+            f"📊 <b>Queries run:</b> {meta.get('queries_run', 0)}\n"
+            f"🎯 <b>Unique results:</b> {meta.get('total_results', 0)}\n"
+            f"🌐 <b>Unique domains:</b> {meta.get('unique_domains', 0)}\n"
+            f"📡 <b>API calls:</b> {meta.get('api_calls', 0)}\n\n"
+            f"<b>Severity breakdown:</b>\n{sev_lines}\n\n"
+            f"🕐 <b>Finished:</b> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        )
+
+        # Upload each exported file as a document
+        for path in exported_files:
+            if path.exists():
+                self.send_document(
+                    path,
+                    caption=f"📎 <b>{path.suffix.lstrip('.').upper()} report</b> — SSN Dorker v{VERSION}"
+                )
+
+    def send_top_results(self, results: list[dict], top: int = 10):
+        """Send the top-N results as a compact digest (critical/high first)."""
+        high_prio = [r for r in results if r.get("severity") in ("critical", "high")][:top]
+        if not high_prio:
+            return
+        lines = [f"🏆 <b>Top {len(high_prio)} High/Critical Findings</b>\n"]
+        for i, r in enumerate(high_prio, 1):
+            sev   = r.get("severity", "info")
+            emoji = SEV_EMOJI.get(sev, "ℹ️")
+            title = self._escape(r.get("title", "")[:60])
+            url   = self._escape(r.get("url", "")[:100])
+            score = r.get("risk_score", 0)
+            lines.append(
+                f"{i}. {emoji} <b>[{score}]</b> <a href=\"{url}\">{title}</a>"
+            )
+        self.send_message("\n".join(lines))
+
+
+# ─────────────────────────────────────────────────────────────
 # Core dorking engine
 # ─────────────────────────────────────────────────────────────
 
 class SSNDorker:
-    def __init__(self, config: dict, logger: logging.Logger):
-        self.config = config
-        self.logger = logger
-        self.client = ValueSERPClient(config["api_key"], config, logger)
+    def __init__(self, config: dict, logger: logging.Logger,
+                 notifier: Optional["TelegramNotifier"] = None):
+        self.config   = config
+        self.logger   = logger
+        self.notifier = notifier
+        self.client   = ValueSERPClient(config["api_key"], config, logger)
         self.all_results: list[dict] = []
-        self.seen_urls: set[str] = set()
-        self.stats: dict = defaultdict(int)
+        self.seen_urls:   set[str]   = set()
+        self.stats:       dict       = defaultdict(int)
 
     def run_query(self, query: str, pages: int, delay: float) -> list[dict]:
         found = []
@@ -592,6 +824,9 @@ class SSNDorker:
                     r["dork_page"] = page
                     r["discovered_at"] = datetime.utcnow().isoformat()
                     found.append(r)
+                    # Real-time Telegram alert for high/critical hits
+                    if self.notifier and sev in ("critical", "high", "medium"):
+                        self.notifier.send_result(r)
 
             self.stats["total_raw_results"] += len(results)
             if page < pages:
@@ -635,6 +870,9 @@ class SSNDorker:
             len(custom_queries or DORK_TEMPLATES.get(c, []))
             for c in categories
         )
+
+        if self.notifier:
+            self.notifier.send_scan_start(categories, pages, total_queries)
 
         if RICH_AVAILABLE:
             with Progress(
@@ -731,6 +969,21 @@ def interactive_mode(config: dict, logger: logging.Logger):
             choices=["json", "csv", "html", "txt", "all", "none"],
             default="all",
         )
+        use_tg = Confirm.ask(
+            "[bold]Send results to Telegram?[/bold]",
+            default=bool(config.get("tg_bot_token") and config.get("tg_chat_id")),
+        )
+        if use_tg:
+            if not config.get("tg_bot_token"):
+                config["tg_bot_token"] = Prompt.ask("[bold cyan]Telegram bot token[/bold cyan]")
+                if Confirm.ask("Save bot token?", default=True):
+                    save_tg_token(config["tg_bot_token"])
+            if not config.get("tg_chat_id"):
+                config["tg_chat_id"] = Prompt.ask("[bold cyan]Your Telegram chat/user ID[/bold cyan]")
+                if Confirm.ask("Save chat ID?", default=True):
+                    save_tg_chat_id(config["tg_chat_id"])
+            tg_min = int(Prompt.ask("[bold]Only send results with score ≥[/bold]", default="20"))
+            config["tg_min_score"] = tg_min
     else:
         selected = list(DORK_TEMPLATES.keys())
         pages = 3
@@ -738,8 +991,10 @@ def interactive_mode(config: dict, logger: logging.Logger):
         min_score = 0
         strict = True
         export_fmt = "all"
+        use_tg = bool(config.get("tg_bot_token") and config.get("tg_chat_id"))
 
-    dorker = SSNDorker(config, logger)
+    notifier = _build_notifier(config, logger) if use_tg else None
+    dorker = SSNDorker(config, logger, notifier=notifier)
     results = dorker.run(selected, pages, delay, strict, min_score)
 
     cprint(f"\n[bold green]Done! {len(results)} unique results.[/bold green]")
@@ -768,19 +1023,29 @@ def interactive_mode(config: dict, logger: logging.Logger):
         "Session start":    stamp,
     })
 
+    exported_files: list[Path] = []
     if export_fmt != "none" and results:
         RESULTS_DIR.mkdir(exist_ok=True)
         base = RESULTS_DIR / f"ssn_dork_{stamp}"
         fmts = ["json", "csv", "html", "txt"] if export_fmt == "all" else [export_fmt]
         for fmt in fmts:
             if fmt == "json":
-                export_json(results, base.with_suffix(".json"), meta)
+                p = base.with_suffix(".json"); export_json(results, p, meta); exported_files.append(p)
             elif fmt == "csv":
-                export_csv(results, base.with_suffix(".csv"))
+                p = base.with_suffix(".csv"); export_csv(results, p); exported_files.append(p)
             elif fmt == "html":
-                export_html(results, base.with_suffix(".html"), meta)
+                p = base.with_suffix(".html"); export_html(results, p, meta); exported_files.append(p)
             elif fmt == "txt":
-                export_txt(results, base.with_suffix(".txt"), meta)
+                p = base.with_suffix(".txt"); export_txt(results, p, meta); exported_files.append(p)
+
+    if notifier and results:
+        cprint("[cyan]Sending summary to Telegram...[/cyan]")
+        notifier.send_top_results(results, top=10)
+        notifier.send_summary(
+            results, meta,
+            exported_files if config.get("tg_send_files") else [],
+        )
+        cprint("[green]Telegram notifications sent.[/green]")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -854,6 +1119,25 @@ EXAMPLES
     p.add_argument("--top",      type=int, default=0,
                    help="Show only top N results in table")
 
+    # Telegram
+    tg = p.add_argument_group("Telegram notifications")
+    tg.add_argument("--telegram",       action="store_true",
+                    help="Enable Telegram notifications for this run")
+    tg.add_argument("--tg-bot-token",   metavar="TOKEN",
+                    help="Telegram bot token (overrides env/config)")
+    tg.add_argument("--tg-chat-id",     metavar="ID",
+                    help="Telegram chat/user ID to send results to")
+    tg.add_argument("--tg-min-score",   type=int, default=None, metavar="N",
+                    help="Only send results with risk score ≥ N via Telegram (default: 0)")
+    tg.add_argument("--tg-no-files",    action="store_true",
+                    help="Don't attach exported files to the Telegram summary")
+    tg.add_argument("--tg-test",        action="store_true",
+                    help="Test Telegram credentials and exit")
+    tg.add_argument("--set-tg-token",   metavar="TOKEN",
+                    help="Save Telegram bot token to config and exit")
+    tg.add_argument("--set-tg-chat-id", metavar="ID",
+                    help="Save Telegram chat ID to config and exit")
+
     # Modes
     p.add_argument("--interactive", action="store_true", help="Launch interactive guided mode")
     p.add_argument("--verbose",     action="store_true", help="Enable verbose/debug logging")
@@ -877,6 +1161,24 @@ def list_categories():
 
 
 # ─────────────────────────────────────────────────────────────
+# Notifier factory
+# ─────────────────────────────────────────────────────────────
+
+def _build_notifier(config: dict, logger: logging.Logger) -> Optional[TelegramNotifier]:
+    token   = config.get("tg_bot_token", "").strip()
+    chat_id = config.get("tg_chat_id", "").strip()
+    if not token or not chat_id:
+        return None
+    return TelegramNotifier(
+        bot_token=token,
+        chat_id=chat_id,
+        logger=logger,
+        proxy=config.get("proxy", ""),
+        min_score=config.get("tg_min_score", 0),
+    )
+
+
+# ─────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────
 
@@ -892,9 +1194,36 @@ def main():
         save_api_key(args.set_api_key)
         sys.exit(0)
 
+    if args.set_tg_token:
+        save_tg_token(args.set_tg_token)
+        sys.exit(0)
+
+    if args.set_tg_chat_id:
+        save_tg_chat_id(args.set_tg_chat_id)
+        sys.exit(0)
+
     if args.list_categories:
         list_categories()
         sys.exit(0)
+
+    # ── Telegram credential overrides ─────────────────────────
+    if args.tg_bot_token:
+        config["tg_bot_token"] = args.tg_bot_token
+    if args.tg_chat_id:
+        config["tg_chat_id"] = args.tg_chat_id
+    if args.tg_min_score is not None:
+        config["tg_min_score"] = args.tg_min_score
+    if args.tg_no_files:
+        config["tg_send_files"] = False
+
+    # ── Telegram test ─────────────────────────────────────────
+    if args.tg_test:
+        notifier = _build_notifier(config, logger)
+        if not notifier:
+            cprint("[red]No Telegram credentials configured. Use --tg-bot-token and --tg-chat-id.[/red]")
+            sys.exit(1)
+        ok = notifier.test()
+        sys.exit(0 if ok else 1)
 
     # ── Interactive mode ──────────────────────────────────────
     if args.interactive or (not args.all and not args.categories and not args.custom_queries):
@@ -936,7 +1265,13 @@ def main():
     pages = args.pages or config["default_pages"]
     delay = args.delay or config["delay"]
 
-    dorker = SSNDorker(config, logger)
+    notifier = _build_notifier(config, logger) if args.telegram else None
+    if notifier:
+        if not notifier.test():
+            cprint("[yellow]Warning: Telegram test failed — notifications disabled.[/yellow]")
+            notifier = None
+
+    dorker = SSNDorker(config, logger, notifier=notifier)
     results = dorker.run(
         categories=categories,
         pages=pages,
@@ -976,6 +1311,7 @@ def main():
         "API calls made": meta["api_calls"],
     })
 
+    exported_files: list[Path] = []
     if args.export != "none" and results:
         out_dir = Path(args.output)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -983,13 +1319,22 @@ def main():
         fmts = ["json","csv","html","txt"] if args.export == "all" else [args.export]
         for fmt in fmts:
             if fmt == "json":
-                export_json(results, base.with_suffix(".json"), meta)
+                p = base.with_suffix(".json"); export_json(results, p, meta); exported_files.append(p)
             elif fmt == "csv":
-                export_csv(results, base.with_suffix(".csv"))
+                p = base.with_suffix(".csv"); export_csv(results, p); exported_files.append(p)
             elif fmt == "html":
-                export_html(results, base.with_suffix(".html"), meta)
+                p = base.with_suffix(".html"); export_html(results, p, meta); exported_files.append(p)
             elif fmt == "txt":
-                export_txt(results, base.with_suffix(".txt"), meta)
+                p = base.with_suffix(".txt"); export_txt(results, p, meta); exported_files.append(p)
+
+    if notifier and results:
+        cprint("[cyan]Sending Telegram summary...[/cyan]")
+        notifier.send_top_results(results, top=10)
+        notifier.send_summary(
+            results, meta,
+            exported_files if config.get("tg_send_files") else [],
+        )
+        cprint("[green]Telegram notifications sent.[/green]")
 
 
 if __name__ == "__main__":
